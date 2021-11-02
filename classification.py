@@ -16,8 +16,8 @@ import matplotlib.pyplot as plt
 import torchvision.transforms as T
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
-from torch.utils.data import random_split
-from sklearn.model_selection import KFold
+from torch.utils.data import random_split, SubsetRandomSampler
+from sklearn.model_selection import StratifiedKFold, KFold
 from torch.utils.tensorboard.writer import SummaryWriter
 
 import time
@@ -37,13 +37,14 @@ main_path = "/home/rudrajit_sengupta/kaggle/dataset"
 IMG_SIZE = 64
 BATCH_SIZE = 4
 NUM_SAMPLES = 16
-EPOCHS = 300
+EPOCHS = 100
 LRate = 0.001
 WEIGHT_DECAY=0.000
 SEED = 42
 NUM_WORKERS = 4
 TRAIN_SPLIT = 0.85
 BAD_DATA_LIST = [109, 123, 709]
+KFOLD_NUM_SPLIT = 5
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -293,33 +294,6 @@ def main_rsna():
 
     weight_file_name = f"./model_weights.pt"
 
-    #Data Loader
-    transforms = T.Compose([T.ToTensor()])
-
-    data = MRIdata(f"{main_path}/train_labels.csv", transform=transforms)
-
-    train_data_len = int(len(data) * TRAIN_SPLIT)
-    val_data_len = len(data) - train_data_len
-
-    train_set, val_set = torch.utils.data.random_split(data, [train_data_len, val_data_len])
-    train_loader = DataLoader(
-                    dataset = train_set,
-                    shuffle=False,
-                    batch_size=BATCH_SIZE,
-                    pin_memory=True,
-                    num_workers=NUM_WORKERS,
-                    persistent_workers=True
-    )
-
-    val_loader = DataLoader(
-                    dataset = val_set,
-                    shuffle=False,
-                    batch_size=BATCH_SIZE,
-                    pin_memory=True,
-                    num_workers=NUM_WORKERS,
-                    persistent_workers=True
-    )
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     net = mResNet().to(device)
 
@@ -336,33 +310,72 @@ def main_rsna():
     else:
         start_epoch = 0
 
-    for epoch in range(start_epoch, EPOCHS):
+    #Data Loader
+    transforms = T.Compose([T.ToTensor()])
 
-        thisTrainbatchLoss, thisTrainbatchAcc, Train_delta_t = \
-            do_train_val(True, epoch, train_loader, net, optimizer, criterion, stats_file)
-        update_tensorboard(True, writer, epoch, thisTrainbatchLoss, thisTrainbatchAcc)
+    data = MRIdata(f"{main_path}/train_labels.csv", transform=transforms)
 
-        thisValbatchLoss, thisValbatchAcc, Val_delta_t = \
-            do_train_val(False, epoch, val_loader, net, None, criterion, stats_file)
-        update_tensorboard(False, writer, epoch, thisValbatchLoss, thisValbatchAcc)
 
-        stats = dict(
-            Epoch=epoch,
-            BatchLoss=[round(thisTrainbatchLoss, 4), round(thisValbatchLoss, 4)],
-            BatchAcc=[round(thisTrainbatchAcc, 4), round(thisValbatchAcc, 4)],
-            Time = [round(Train_delta_t), round(Val_delta_t)]
-        )
-        print(json.dumps(stats))
-        # print(json.dumps(stats), file=stats_file)
+#    train_data_len = int(len(data) * TRAIN_SPLIT)
+#    val_data_len = len(data) - train_data_len
 
-        if thisTrainbatchLoss + thisValbatchLoss < prevLoss:
-            prevLoss = thisTrainbatchLoss + thisValbatchLoss
-            state = dict(
-                epoch=epoch + 1,
-                model=net.model.state_dict(),
-                optimizer=optimizer.state_dict(),
-            )
-            torch.save(state, weight_file_name)
+#    train_set, val_set = torch.utils.data.random_split(data, [train_data_len, val_data_len])
+
+    kfolds = KFold(KFOLD_NUM_SPLIT, shuffle=True, random_state=SEED)
+    foldId = 0
+    for train_idx, val_idx in kfolds.split(np.arange(len(data))):
+      foldId += 1
+      train_sampler = SubsetRandomSampler(train_idx)
+      val_sampler = SubsetRandomSampler(val_idx)
+
+      train_loader = DataLoader(
+                      dataset = data,
+                      shuffle=False,
+                      batch_size=BATCH_SIZE,
+                      pin_memory=True,
+                      num_workers=NUM_WORKERS,
+                      persistent_workers=True,
+                      sampler = train_sampler
+      )
+
+      val_loader = DataLoader(
+                      dataset = data,
+                      shuffle=False,
+                      batch_size=BATCH_SIZE,
+                      pin_memory=True,
+                      num_workers=NUM_WORKERS,
+                      persistent_workers=True,
+                      sampler = val_sampler
+      )
+
+      for epoch in range(start_epoch, EPOCHS):
+
+          thisTrainbatchLoss, thisTrainbatchAcc, Train_delta_t = \
+              do_train_val(True, epoch, train_loader, net, optimizer, criterion, stats_file)
+          update_tensorboard(True, writer, epoch, thisTrainbatchLoss, thisTrainbatchAcc)
+
+          thisValbatchLoss, thisValbatchAcc, Val_delta_t = \
+              do_train_val(False, epoch, val_loader, net, None, criterion, stats_file)
+          update_tensorboard(False, writer, epoch, thisValbatchLoss, thisValbatchAcc)
+
+          stats = dict(
+              Fold=foldId,
+              Epoch=epoch,
+              BatchLoss=[round(thisTrainbatchLoss, 4), round(thisValbatchLoss, 4)],
+              BatchAcc=[round(thisTrainbatchAcc, 4), round(thisValbatchAcc, 4)],
+              Time = [round(Train_delta_t), round(Val_delta_t)]
+          )
+          print(json.dumps(stats))
+          # print(json.dumps(stats), file=stats_file)
+
+          if thisTrainbatchLoss + thisValbatchLoss < prevLoss:
+              prevLoss = thisTrainbatchLoss + thisValbatchLoss
+              state = dict(
+                  epoch=epoch + 1,
+                  model=net.model.state_dict(),
+                  optimizer=optimizer.state_dict(),
+              )
+              torch.save(state, weight_file_name)
 
     if writer:
         print("Closing tensorboard...")
