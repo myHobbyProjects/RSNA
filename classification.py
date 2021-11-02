@@ -89,29 +89,6 @@ def sort_paths(path):
     return sorted(path, key=lambda x: int(x.split('-')[1].split('.')[0]))
 
 
-# def read_dicom_img(dataset_dir, file_id):
-#     # mp_mri_type = ['FLAIR', 'T1w', 'T1wCE', 'T2w']
-#     mp_mri_type = ['T1w']
-#
-#     file_path = f"{main_path}/{dataset_dir}/{file_id.zfill(5)}"
-#     final_img = []
-#     for mri_type in mp_mri_type:
-#         final_file_path = f"{file_path}/{mri_type}"
-#         sorted_files = sort_paths(os.listdir(final_file_path))
-#         # sorted_files = os.listdir(final_file_path)
-#
-#         for i in range(len(sorted_files)):
-#             data = pdcm.dcmread(f"{final_file_path}/{sorted_files[i]}")
-#
-#             img_data = data.pixel_array
-#             img_data = resize(img_data, (IMG_SIZE, IMG_SIZE), anti_aliasing=True)
-#             img_data = (img_data - np.min(img_data)) / (np.max(img_data) + 1)
-#             final_img.append(img_data)
-#             if len(final_img) == NUM_SAMPLES:
-#                 break
-#     # final_img = sorted(final_img, key=lambda x: np.mean(x), reverse=True)[:NUM_SAMPLES]
-#     return np.asarray(final_img)
-
 class cacheClass():
   def __init__(self):
     self.cache = {}
@@ -176,10 +153,6 @@ def read_dicom_img(dataset_dir, file_id, cache):
         cache.update(file_id.zfill(5), dataset_dir, mri_type, start)
 
         final_img = final_img[start:(start + NUM_SAMPLES)]
-    # final_img = sorted(final_img, key=lambda x: np.mean(x), reverse=True)[:NUM_SAMPLES]
-    # print("obj %s select %d - %d"%(file_id.zfill(5), start, end))
-
-    #print("final_img shape {0}\t len={1} file={2}".format(np.asarray(final_img).shape, len(final_img), file_id)) 
     return np.asarray(final_img)
 
 
@@ -219,32 +192,6 @@ def get_elapsed_time(start):
     return time.time() - start
 
 # Define Network Architecture
-class MRINet(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv = nn.Sequential(self.conv_layer(in_chan=64, out_chan=128),
-                                  self.conv_layer(in_chan=128, out_chan=128),
-                                  self.conv_layer(in_chan=128, out_chan=256))
-
-        self.fc = nn.Sequential(nn.Linear(9216, 512),
-                                nn.Dropout(p=0.15),
-                                nn.Linear(512, 1))
-
-    def conv_layer(self, in_chan, out_chan):
-        conv_layer = nn.Sequential(
-            nn.Conv2d(in_chan, out_chan, kernel_size=(3, 3), padding=0),
-            nn.LeakyReLU(),
-            nn.MaxPool2d((2, 2)),
-            nn.BatchNorm2d(out_chan))
-
-        return conv_layer
-
-    def forward(self, x):
-        out = self.conv(x)
-        out = out.view(out.size(0), -1)
-        out = self.fc(out)
-        return out
-
 class mResNet(nn.Module):
     def __init__(self, args=None):
         super().__init__()
@@ -320,95 +267,6 @@ def do_train_val(is_train, epoch, loader, model, optimizer, criterion, stats_fil
 
     return losses.avg, batchAcc.avg, delta_t
 
-
-# def do_train(train_loader, stats_file, writer):
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     print(device)
-#     # stats_file = args.stats_file
-#     # net = MRINet().to(device)
-#     net = mResNet().to(device)
-#
-#     criterion = nn.BCEWithLogitsLoss()
-#     optimizer = optim.Adam(net.parameters(), lr=LRate)
-#     net.model.train()
-#
-#     for epoch in range(EPOCHS):
-#         total_loss = 0.0
-#         count = 0
-#
-#         start = time.time()
-#         for indx, data in enumerate(train_loader, 0):
-#
-#             inputs, labels = data["features"].to(device), data["labels"].to(device)
-#             optimizer.zero_grad()
-#
-#             outputs = net(inputs).squeeze(1)
-#
-#             loss = criterion(outputs, labels)
-#             loss.backward()
-#             total_loss += loss.detach().item()
-#             optimizer.step()
-#
-#             count += 1
-#             acc_step_loss = total_loss / count
-#             stats = dict(
-#                 Epoch=epoch,
-#                 Step = indx,
-#                 Time=round((time.time() - start), 0),
-#                 Loss=round(acc_step_loss, 4))
-#
-#             print(json.dumps(stats))
-#             print(json.dumps(stats), file=stats_file)
-#             if writer:
-#                 writer.add_scalar(
-#                     "training_loss", loss.item(), indx + (epoch * len(train_loader))
-#                 )
-#             # print(".")
-#
-#         print(f"Epoch:{epoch}/{EPOCHS} - Loss:{acc_step_loss}")
-#
-#
-#     print("Training Complete")
-
-def do_validation(epoch, val_loader, model, criterion, writer, stats_file):
-    model.eval()
-    losses = AverageMeter()
-    batchAcc = AverageMeter()
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    start = time.time()
-    for indx, data in enumerate(val_loader, 0):
-        with torch.no_grad():
-            inputs, labels = data["features"].to(device), data["labels"].to(device)
-            output = model(inputs).to(device)
-            loss = criterion(output[:,0], labels)
-            losses.update(loss.detach().item(), output.shape[0])
-
-            output = torch.sigmoid(output).cpu().squeeze().detach()
-            acc = accuracy(output,labels)
-            batchAcc.update(acc)
-            delta_t = time.time() - start
-
-            if writer:
-                writer.add_scalar(
-                    "Loss/validation", loss.item(), indx + (epoch * len(val_loader))
-                )
-                writer.add_scalar(
-                    "Accuracy/validation", acc, indx + (epoch * len(val_loader))
-                )
-
-    return losses.avg, batchAcc.avg, delta_t
-
-# def do_inference(test_loader):
-#     preds = []
-#
-#     for query in test_loader:
-#         with torch.no_grad():
-#             output = net(query["features"].to(device))
-#             output = torch.sigmoid(output).cpu().numpy().squeeze()
-#             preds.append(output)
-#
-#     return preds
 def update_tensorboard(is_train, writer, epoch, loss, acc):
     if is_train:
       loss_tag = "Loss/train"
@@ -439,7 +297,6 @@ def main_rsna():
     transforms = T.Compose([T.ToTensor()])
 
     data = MRIdata(f"{main_path}/train_labels.csv", transform=transforms)
-    #data = MRIdata(f"{main_path}/target2_labels.csv", transform=transforms)
 
     train_data_len = int(len(data) * TRAIN_SPLIT)
     val_data_len = len(data) - train_data_len
@@ -462,11 +319,7 @@ def main_rsna():
                     num_workers=NUM_WORKERS,
                     persistent_workers=True
     )
-    # test_data = MRIdata(f"{main_path}/sample_submission.csv", train=False,
-    #                     transform=transforms)
-    # test_loader = DataLoader(test_data, shuffle=False, batch_size=1)
 
-    # net = MRINet().to(device)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     net = mResNet().to(device)
 
@@ -484,8 +337,6 @@ def main_rsna():
         start_epoch = 0
 
     for epoch in range(start_epoch, EPOCHS):
-        total_loss = 0.0
-        count = 0
 
         thisTrainbatchLoss, thisTrainbatchAcc, Train_delta_t = \
             do_train_val(True, epoch, train_loader, net, optimizer, criterion, stats_file)
@@ -503,9 +354,6 @@ def main_rsna():
         )
         print(json.dumps(stats))
         # print(json.dumps(stats), file=stats_file)
-
-        # print(f"Epoch:{0}/{1}\tLoss:{2} {3}\tAccuracy:{4} {5}\n"
-        #       .format(epoch, EPOCHS, thisTrainbatchLoss, thisValbatchLoss, thisTrainbatchAcc, thisValbatchAcc))
 
         if thisTrainbatchLoss + thisValbatchLoss < prevLoss:
             prevLoss = thisTrainbatchLoss + thisValbatchLoss
