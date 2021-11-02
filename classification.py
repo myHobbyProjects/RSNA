@@ -36,12 +36,14 @@ main_path = "/home/rudrajit_sengupta/kaggle/dataset"
 # Hyperparameters
 IMG_SIZE = 64
 BATCH_SIZE = 4
-NUM_SAMPLES = 10
-EPOCHS = 75
+NUM_SAMPLES = 16
+EPOCHS = 300
 LRate = 0.001
+WEIGHT_DECAY=0.000
 SEED = 42
-NUM_WORKERS = 0
-TRAIN_SPLIT = 0.80
+NUM_WORKERS = 4
+TRAIN_SPLIT = 0.85
+BAD_DATA_LIST = [109, 123, 709]
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -71,14 +73,16 @@ def build_args():
     return args
 
 def filter_irrelevant_data(path, indices):
+    missing_keys = []
     # train_df = pd.read_csv(f"{main_path}/train_labels.csv")
     train_df = pd.read_csv(path)
     # test_df = pd.read_csv(f"{main_path}/sample_submission.csv")
 
     for ids in indices:
+        missing_keys.append(train_df[train_df["BraTS21ID"] == ids].index[0])
         train_df.drop(train_df[train_df["BraTS21ID"] == ids].index, inplace=True)
 
-    return train_df #, test_df
+    return train_df, missing_keys
 
 
 def sort_paths(path):
@@ -148,7 +152,6 @@ def read_dicom_img(dataset_dir, file_id, cache):
 
             img_data = (img_data - np.min(img_data)) / (np.max(img_data) + 1)
             final_img.append(img_data)
-        
          return np.asarray(final_img)
 
         for i in range(len(sorted_files)):
@@ -163,12 +166,20 @@ def read_dicom_img(dataset_dir, file_id, cache):
 
         maxsumpos = np.argmax(np.array(isum))
         start = int(maxsumpos - (NUM_SAMPLES/2))
-        cache.update(file_id.zfill(5), dataset_dir, mri_type, start)
-        end = int(maxsumpos + (NUM_SAMPLES/2))
+        if start < 0:
+          start = 0
 
-        final_img = final_img[start:end]
+        if (start + NUM_SAMPLES) > len(final_img):
+          delta = (start + NUM_SAMPLES) - len(final_img)
+          start -= delta
+
+        cache.update(file_id.zfill(5), dataset_dir, mri_type, start)
+
+        final_img = final_img[start:(start + NUM_SAMPLES)]
     # final_img = sorted(final_img, key=lambda x: np.mean(x), reverse=True)[:NUM_SAMPLES]
     # print("obj %s select %d - %d"%(file_id.zfill(5), start, end))
+
+    #print("final_img shape {0}\t len={1} file={2}".format(np.asarray(final_img).shape, len(final_img), file_id)) 
     return np.asarray(final_img)
 
 
@@ -176,7 +187,7 @@ def read_dicom_img(dataset_dir, file_id, cache):
 class MRIdata(Dataset):
     def __init__(self, path_to_data, train=True, transform=None):
         # self.data = pd.read_csv(path_to_data)
-        self.data = filter_irrelevant_data(path_to_data, [109, 123, 709])
+        self.data, self.missing_keys  = filter_irrelevant_data(path_to_data, BAD_DATA_LIST)
         self.labels = self.data['MGMT_value']
         self.transform = transform
         self.train = train
@@ -188,6 +199,8 @@ class MRIdata(Dataset):
         return len(self.data)
 
     def __getitem__(self, index):
+        if index in self.missing_keys:
+          index +=1
         inp_data = read_dicom_img(self.train_dir, str(self.data['BraTS21ID'][index]),self.MetaCache)
         inp_data = self.transform(inp_data).permute(1, 0, 2)
         # inp_data = self.transform(inp_data)
@@ -236,8 +249,7 @@ class mResNet(nn.Module):
     def __init__(self, args=None):
         super().__init__()
         # self.args = args
-        self.model = torchvision.models.resnet152(pretrained=True)
-        # self.model = torch.nn.Sequential(*(list(m.children())))
+        self.model = torchvision.models.resnet152(pretrained=False)
 
         self.model.conv1 = nn.Conv2d(
             in_channels= NUM_SAMPLES, #args.in_channels,
@@ -245,7 +257,6 @@ class mResNet(nn.Module):
             kernel_size=7,
             stride=2,
             padding=3,
-            bias=False,
         )
         self.fc2 = nn.Linear(1000, 512, bias=True)
         self.fc3 = nn.Linear(512, 1, bias=True)
@@ -398,6 +409,16 @@ def do_validation(epoch, val_loader, model, criterion, writer, stats_file):
 #             preds.append(output)
 #
 #     return preds
+def update_tensorboard(is_train, writer, epoch, loss, acc):
+    if is_train:
+      loss_tag = "Loss/train"
+      acc_tag = "Accuracy/train"
+    else:
+      loss_tag = "Loss/val"
+      acc_tag = "Accuracy/val"
+
+    writer.add_scalar(loss_tag, loss, epoch)
+    writer.add_scalar(acc_tag, acc, epoch)
 
 def main_rsna():
     prevLoss = float("inf")
@@ -417,8 +438,8 @@ def main_rsna():
     #Data Loader
     transforms = T.Compose([T.ToTensor()])
 
-    # data = MRIdata(f"{main_path}/train_labels.csv", transform=transforms)
-    data = MRIdata(f"{main_path}/target2_labels.csv", transform=transforms)
+    data = MRIdata(f"{main_path}/train_labels.csv", transform=transforms)
+    #data = MRIdata(f"{main_path}/target2_labels.csv", transform=transforms)
 
     train_data_len = int(len(data) * TRAIN_SPLIT)
     val_data_len = len(data) - train_data_len
@@ -429,7 +450,8 @@ def main_rsna():
                     shuffle=False,
                     batch_size=BATCH_SIZE,
                     pin_memory=True,
-                    num_workers=NUM_WORKERS
+                    num_workers=NUM_WORKERS,
+                    persistent_workers=True
     )
 
     val_loader = DataLoader(
@@ -437,7 +459,8 @@ def main_rsna():
                     shuffle=False,
                     batch_size=BATCH_SIZE,
                     pin_memory=True,
-                    num_workers=NUM_WORKERS
+                    num_workers=NUM_WORKERS,
+                    persistent_workers=True
     )
     # test_data = MRIdata(f"{main_path}/sample_submission.csv", train=False,
     #                     transform=transforms)
@@ -448,7 +471,8 @@ def main_rsna():
     net = mResNet().to(device)
 
     criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(net.parameters(), lr=LRate)
+    #optimizer = optim.Adam(net.parameters(), lr=LRate, weight_decay=WEIGHT_DECAY)
+    optimizer = optim.SGD(net.parameters(), lr=LRate, momentum=0.9)
 
     # resume if weights file exists
     if Path(weight_file_name).is_file():
@@ -464,10 +488,12 @@ def main_rsna():
         count = 0
 
         thisTrainbatchLoss, thisTrainbatchAcc, Train_delta_t = \
-            do_train_val(True, epoch, train_loader, net, optimizer, criterion, stats_file, writer)
+            do_train_val(True, epoch, train_loader, net, optimizer, criterion, stats_file)
+        update_tensorboard(True, writer, epoch, thisTrainbatchLoss, thisTrainbatchAcc)
 
         thisValbatchLoss, thisValbatchAcc, Val_delta_t = \
-            do_train_val(False, epoch, val_loader, net, None, criterion, stats_file, writer)
+            do_train_val(False, epoch, val_loader, net, None, criterion, stats_file)
+        update_tensorboard(False, writer, epoch, thisValbatchLoss, thisValbatchAcc)
 
         stats = dict(
             Epoch=epoch,
@@ -481,14 +507,14 @@ def main_rsna():
         # print(f"Epoch:{0}/{1}\tLoss:{2} {3}\tAccuracy:{4} {5}\n"
         #       .format(epoch, EPOCHS, thisTrainbatchLoss, thisValbatchLoss, thisTrainbatchAcc, thisValbatchAcc))
 
-        if thisValbatchLoss < prevLoss:
-            prevLoss = thisValbatchLoss
+        if thisTrainbatchLoss + thisValbatchLoss < prevLoss:
+            prevLoss = thisTrainbatchLoss + thisValbatchLoss
             state = dict(
                 epoch=epoch + 1,
                 model=net.model.state_dict(),
                 optimizer=optimizer.state_dict(),
             )
-            # torch.save(state, weight_file_name)
+            torch.save(state, weight_file_name)
 
     if writer:
         print("Closing tensorboard...")
